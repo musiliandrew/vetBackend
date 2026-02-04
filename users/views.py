@@ -5,12 +5,11 @@ from rest_framework.authtoken.models import Token
 from django.contrib.auth import authenticate
 from django.core.mail import send_mail
 from django.conf import settings
-from .models import User
+from .models import User, EmailOTP
 from .serializers import UserSerializer, RegisterSerializer
 import random
-
-# Simple OTP store (replace with Redis in production)
-otp_store = {}
+from django.utils import timezone
+from datetime import timedelta
 
 @api_view(['POST'])
 @permission_classes([permissions.AllowAny])
@@ -52,14 +51,17 @@ def send_otp(request):
     if not email:
         return Response({"error": "Email is required"}, status=status.HTTP_400_BAD_REQUEST)
     
-    otp = str(random.randint(1000, 9999))
-    otp_store[email] = otp
-    print(f"OTP for {email}: {otp}")
+    otp_code = str(random.randint(1000, 9999))
+    
+    # Store in database
+    EmailOTP.objects.create(email=email, otp=otp_code)
+    
+    print(f"OTP for {email}: {otp_code}")
     
     try:
         send_mail(
             subject='VetPathshala OTP Verification',
-            message=f'Your OTP is {otp}. It is valid for 10 minutes.',
+            message=f'Your OTP is {otp_code}. It is valid for 10 minutes.',
             from_email=settings.DEFAULT_FROM_EMAIL,
             recipient_list=[email],
             fail_silently=False,
@@ -73,14 +75,23 @@ def send_otp(request):
 @permission_classes([permissions.AllowAny])
 def verify_otp(request):
     email = request.data.get('email')
-    otp = request.data.get('otp')
+    otp_code = request.data.get('otp')
     
-    if not email or not otp:
+    if not email or not otp_code:
         return Response({"error": "Email and OTP are required"}, status=status.HTTP_400_BAD_REQUEST)
 
-    if otp_store.get(email) == otp:
-        # If user exists, return token, else tell front-end to register
-        # We assume username or email matches
+    # Check database for most recent OTP in last 10 minutes
+    time_threshold = timezone.now() - timedelta(minutes=10)
+    otp_entry = EmailOTP.objects.filter(
+        email=email, 
+        otp=otp_code,
+        created_at__gte=time_threshold
+    ).first()
+
+    if otp_entry:
+        # Delete the OTP after use (optional but secure)
+        otp_entry.delete()
+        
         user = User.objects.filter(email=email).first()
         if user:
             token, _ = Token.objects.get_or_create(user=user)
@@ -91,4 +102,5 @@ def verify_otp(request):
                 "user": UserSerializer(user).data
             })
         return Response({"verified": True, "registered": False})
-    return Response({"error": "Invalid OTP"}, status=status.HTTP_400_BAD_REQUEST)
+    
+    return Response({"error": "Invalid or expired OTP"}, status=status.HTTP_400_BAD_REQUEST)
